@@ -1,0 +1,13 @@
+# Group Scholar Review Queue Forecaster Progress
+
+## Iteration 1
+- Bootstrapped a Go CLI to summarize review latency and SLA breach risk from CSV exports.
+- Added stage-level stats, reviewer coverage counts, JSON output, and sample data.
+
+## Iteration 2
+- Added aging buckets (on-time, at-risk, overdue) plus risk tier classification for stages and reviewers.
+- Extended console output and JSON reports with the new aging/risk signals.
+
+## Iteration 3
+- Added throughput trend comparisons between current and prior windows (overall + stages) with delta and per-week rates.
+- Surfaced throughput trend insights in console output and JSON report payloads.
