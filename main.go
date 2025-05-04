@@ -104,14 +104,29 @@ type QueueStageForecast struct {
 	ClearanceStatus    string  `json:"clearance_status"`
 }
 
+type QueueReviewerForecast struct {
+	ReviewerID         string  `json:"reviewer_id"`
+	PendingCount       int     `json:"pending_count"`
+	AvgAgeDays         float64 `json:"avg_age_days"`
+	OverdueCount       int     `json:"overdue_count"`
+	DueSoonCount       int     `json:"due_soon_count"`
+	OnTrackCount       int     `json:"on_track_count"`
+	ThroughputPerWeek  float64 `json:"throughput_per_week"`
+	EstimatedClearDays float64 `json:"estimated_clear_days"`
+	ClearanceStatus    string  `json:"clearance_status"`
+}
+
 type QueueReport struct {
 	AsOf           string               `json:"as_of"`
 	TotalPending   int                  `json:"total_pending"`
+	AssignedCount  int                  `json:"assigned_count"`
+	UnassignedCount int                 `json:"unassigned_count"`
 	OverdueCount   int                  `json:"overdue_count"`
 	DueSoonCount   int                  `json:"due_soon_count"`
 	OnTrackCount   int                  `json:"on_track_count"`
 	AvgAgeDays     float64              `json:"avg_age_days"`
 	Stages         []QueueStageForecast `json:"stages"`
+	Reviewers      []QueueReviewerForecast `json:"reviewers"`
 	ThroughputDays int                  `json:"throughput_days"`
 	DueSoonRatio   float64              `json:"due_soon_ratio"`
 }
