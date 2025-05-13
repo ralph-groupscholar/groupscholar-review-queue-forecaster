@@ -1,6 +1,6 @@
 # Group Scholar Review Queue Forecaster
 
-Local-first CLI that estimates review latency, SLA breach risk, and reviewer coverage from review event CSVs.
+Local-first CLI that estimates review latency, SLA breach risk, reviewer coverage, and queue clearance projections from review event CSVs.
 
 ## Features
 - Stage-level latency stats (average, median, p90, max)
@@ -9,6 +9,8 @@ Local-first CLI that estimates review latency, SLA breach risk, and reviewer cov
 - Aging buckets (on time, at risk, overdue) with risk tiers
 - Reviewer throughput snapshots with last-reviewed timestamp
 - Throughput trend comparison versus prior window (overall + top stages)
+- Queue forecast with due-soon/overdue counts, clearance estimates, and assigned vs unassigned split
+- Reviewer-level queue forecast with throughput-based clear days
 - JSON output for downstream reporting
 
 ## Quickstart
@@ -28,6 +30,14 @@ go run . --input data/sample-events.csv --reviewer-top 3
 go run . --input data/sample-events.csv --throughput-days 21
 ```
 
+```bash
+go run . --input data/sample-events.csv --queue data/sample-queue.csv
+```
+
+```bash
+go run . --input data/sample-events.csv --queue data/sample-queue.csv --csv-out exports/review-queue
+```
+
 ## CSV Format
 Required columns:
 - application_id
@@ -37,6 +47,12 @@ Required columns:
 - reviewer_id
 
 Accepted date formats: RFC3339, `YYYY-MM-DD`, or `YYYY-MM-DD HH:MM:SS`.
+
+Queue CSV columns:
+- application_id
+- stage
+- submitted_at
+- reviewer_id (optional)
 
 ## Example Output
 ```

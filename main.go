@@ -557,14 +557,25 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 	dueSoonThreshold := float64(slaDays) * dueSoonRatio
 
 	stageBuckets := map[string][]QueueItem{}
+	reviewerBuckets := map[string][]QueueItem{}
 	totalPending := len(queueItems)
 	var totalAge float64
 	overdue := 0
 	dueSoon := 0
 	onTrack := 0
+	assignedCount := 0
+	unassignedCount := 0
 
 	for _, item := range queueItems {
 		stageBuckets[item.Stage] = append(stageBuckets[item.Stage], item)
+		reviewerID := strings.TrimSpace(item.ReviewerID)
+		if reviewerID == "" {
+			reviewerID = "unassigned"
+			unassignedCount++
+		} else {
+			assignedCount++
+		}
+		reviewerBuckets[reviewerID] = append(reviewerBuckets[reviewerID], item)
 		age := asOf.Sub(item.SubmittedAt).Hours() / 24
 		if age < 0 {
 			age = 0
@@ -662,17 +673,109 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 		avgAge = totalAge / float64(totalPending)
 	}
 
-	return &QueueReport{
-		AsOf:           asOf.Format(time.RFC3339),
-		TotalPending:   totalPending,
-		OverdueCount:   overdue,
-		DueSoonCount:   dueSoon,
-		OnTrackCount:   onTrack,
-		AvgAgeDays:     round(avgAge, 2),
-		Stages:         stages,
-		ThroughputDays: throughputDays,
-		DueSoonRatio:   dueSoonRatio,
+	reviewerThroughput := map[string]int{}
+	if throughputDays > 0 {
+		for _, event := range events {
+			if event.ReviewedAt.Before(windowStart) || event.ReviewedAt.After(asOf) {
+				continue
+			}
+			reviewerID := strings.TrimSpace(event.ReviewerID)
+			if reviewerID == "" {
+				reviewerID = "unassigned"
+			}
+			reviewerThroughput[reviewerID]++
+		}
 	}
+	reviewers := buildQueueReviewerForecasts(reviewerBuckets, reviewerThroughput, slaDays, throughputDays, asOf, dueSoonThreshold)
+
+	return &QueueReport{
+		AsOf:            asOf.Format(time.RFC3339),
+		TotalPending:    totalPending,
+		AssignedCount:   assignedCount,
+		UnassignedCount: unassignedCount,
+		OverdueCount:    overdue,
+		DueSoonCount:    dueSoon,
+		OnTrackCount:    onTrack,
+		AvgAgeDays:      round(avgAge, 2),
+		Stages:          stages,
+		Reviewers:       reviewers,
+		ThroughputDays:  throughputDays,
+		DueSoonRatio:    dueSoonRatio,
+	}
+}
+
+func buildQueueReviewerForecasts(reviewerBuckets map[string][]QueueItem, reviewerThroughput map[string]int, slaDays int, throughputDays int, asOf time.Time, dueSoonThreshold float64) []QueueReviewerForecast {
+	if len(reviewerBuckets) == 0 {
+		return nil
+	}
+	reviewers := make([]QueueReviewerForecast, 0, len(reviewerBuckets))
+	for reviewerID, items := range reviewerBuckets {
+		pending := len(items)
+		var ageSum float64
+		overdue := 0
+		dueSoon := 0
+		onTrack := 0
+		for _, item := range items {
+			age := asOf.Sub(item.SubmittedAt).Hours() / 24
+			if age < 0 {
+				age = 0
+			}
+			ageSum += age
+			switch {
+			case age >= float64(slaDays):
+				overdue++
+			case age >= dueSoonThreshold:
+				dueSoon++
+			default:
+				onTrack++
+			}
+		}
+
+		avgAge := 0.0
+		if pending > 0 {
+			avgAge = ageSum / float64(pending)
+		}
+
+		throughputPerWeek := 0.0
+		if throughputDays > 0 {
+			throughputPerWeek = float64(reviewerThroughput[reviewerID]) / (float64(throughputDays) / 7.0)
+		}
+
+		estimatedClear := 0.0
+		clearanceStatus := "no throughput data"
+		if throughputPerWeek > 0 {
+			dailyThroughput := throughputPerWeek / 7.0
+			estimatedClear = float64(pending) / dailyThroughput
+			switch {
+			case estimatedClear <= 7:
+				clearanceStatus = "healthy"
+			case estimatedClear <= 14:
+				clearanceStatus = "watch"
+			default:
+				clearanceStatus = "at risk"
+			}
+		}
+
+		reviewers = append(reviewers, QueueReviewerForecast{
+			ReviewerID:         reviewerID,
+			PendingCount:       pending,
+			AvgAgeDays:         round(avgAge, 2),
+			OverdueCount:       overdue,
+			DueSoonCount:       dueSoon,
+			OnTrackCount:       onTrack,
+			ThroughputPerWeek:  round(throughputPerWeek, 2),
+			EstimatedClearDays: round(estimatedClear, 2),
+			ClearanceStatus:    clearanceStatus,
+		})
+	}
+
+	sort.Slice(reviewers, func(i, j int) bool {
+		if reviewers[i].PendingCount == reviewers[j].PendingCount {
+			return reviewers[i].AvgAgeDays > reviewers[j].AvgAgeDays
+		}
+		return reviewers[i].PendingCount > reviewers[j].PendingCount
+	})
+	return reviewers
 }
 
 func buildReviewerStats(events []ReviewEvent, slaDays int, windowStart time.Time, asOf time.Time, throughputDays int) []ReviewerStats {
@@ -878,6 +981,9 @@ func writeCSVReports(report Report, output string) error {
 		if err := writeQueueCSV(basePath+"-queue-forecast.csv", report.Queue); err != nil {
 			return err
 		}
+		if err := writeQueueReviewerCSV(basePath+"-queue-reviewer-forecast.csv", report.Queue); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1046,6 +1152,7 @@ func writeQueueCSV(path string, queue *QueueReport) error {
 	if err := writer.Write([]string{
 		"stage", "pending_count", "avg_age_days", "overdue_count", "due_soon_count",
 		"on_track_count", "daily_throughput", "estimated_clear_days", "clearance_status",
+		"assigned_count", "unassigned_count",
 	}); err != nil {
 		return err
 	}
@@ -1059,6 +1166,8 @@ func writeQueueCSV(path string, queue *QueueReport) error {
 		"",
 		"",
 		"",
+		strconv.Itoa(queue.AssignedCount),
+		strconv.Itoa(queue.UnassignedCount),
 	}
 	if err := writer.Write(overall); err != nil {
 		return err
@@ -1074,6 +1183,45 @@ func writeQueueCSV(path string, queue *QueueReport) error {
 			formatFloat(stage.DailyThroughput, 2),
 			formatFloat(stage.EstimatedClearDays, 2),
 			stage.ClearanceStatus,
+			"",
+			"",
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeQueueReviewerCSV(path string, queue *QueueReport) error {
+	if queue == nil || len(queue.Reviewers) == 0 {
+		return nil
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"reviewer_id", "pending_count", "avg_age_days", "overdue_count", "due_soon_count",
+		"on_track_count", "throughput_per_week", "estimated_clear_days", "clearance_status",
+	}); err != nil {
+		return err
+	}
+	for _, reviewer := range queue.Reviewers {
+		record := []string{
+			reviewer.ReviewerID,
+			strconv.Itoa(reviewer.PendingCount),
+			formatFloat(reviewer.AvgAgeDays, 2),
+			strconv.Itoa(reviewer.OverdueCount),
+			strconv.Itoa(reviewer.DueSoonCount),
+			strconv.Itoa(reviewer.OnTrackCount),
+			formatFloat(reviewer.ThroughputPerWeek, 2),
+			formatFloat(reviewer.EstimatedClearDays, 2),
+			reviewer.ClearanceStatus,
 		}
 		if err := writer.Write(record); err != nil {
 			return err
@@ -1113,7 +1261,8 @@ func printReport(report Report, reviewerTop int) {
 	if report.Queue != nil {
 		fmt.Println()
 		fmt.Println("Queue Forecast")
-		fmt.Printf("- As of %s | Pending: %d | Avg Age: %.2f days\n", report.Queue.AsOf, report.Queue.TotalPending, report.Queue.AvgAgeDays)
+		fmt.Printf("- As of %s | Pending: %d | Assigned: %d | Unassigned: %d | Avg Age: %.2f days\n",
+			report.Queue.AsOf, report.Queue.TotalPending, report.Queue.AssignedCount, report.Queue.UnassignedCount, report.Queue.AvgAgeDays)
 		fmt.Printf("  On Track: %d | Due Soon: %d | Overdue: %d | Due Soon Ratio: %.2f\n",
 			report.Queue.OnTrackCount, report.Queue.DueSoonCount, report.Queue.OverdueCount, report.Queue.DueSoonRatio)
 		for _, stage := range report.Queue.Stages {
@@ -1122,6 +1271,21 @@ func printReport(report Report, reviewerTop int) {
 				stage.PendingCount, stage.AvgAgeDays, stage.OnTrackCount, stage.DueSoonCount, stage.OverdueCount)
 			fmt.Printf("    Daily Throughput: %.2f | Clear Days: %.2f | Status: %s\n",
 				stage.DailyThroughput, stage.EstimatedClearDays, stage.ClearanceStatus)
+		}
+		if len(report.Queue.Reviewers) > 0 {
+			maxReviewers := 5
+			if maxReviewers > len(report.Queue.Reviewers) {
+				maxReviewers = len(report.Queue.Reviewers)
+			}
+			fmt.Printf("  Reviewer Forecast (Top %d by Pending)\n", maxReviewers)
+			for i := 0; i < maxReviewers; i++ {
+				reviewer := report.Queue.Reviewers[i]
+				fmt.Printf("  - %s\n", reviewer.ReviewerID)
+				fmt.Printf("    Pending: %d | Avg Age: %.2f days | On Track: %d | Due Soon: %d | Overdue: %d\n",
+					reviewer.PendingCount, reviewer.AvgAgeDays, reviewer.OnTrackCount, reviewer.DueSoonCount, reviewer.OverdueCount)
+				fmt.Printf("    Throughput: %.2f/week | Clear Days: %.2f | Status: %s\n",
+					reviewer.ThroughputPerWeek, reviewer.EstimatedClearDays, reviewer.ClearanceStatus)
+			}
 		}
 	}
 }

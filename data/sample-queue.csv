@@ -1,0 +1,7 @@
+application_id,stage,submitted_at,reviewer_id
+A-2001,initial_review,2026-01-23,rev-01
+A-2002,initial_review,2026-01-22,rev-02
+A-2003,committee_review,2026-01-18,rev-03
+A-2004,committee_review,2026-01-16,
+A-2005,final_decision,2026-01-20,rev-05
+A-2006,final_decision,2026-01-19,
