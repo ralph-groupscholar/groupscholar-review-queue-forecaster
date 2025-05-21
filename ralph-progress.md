@@ -11,3 +11,7 @@
 ## Iteration 3
 - Added throughput trend comparisons between current and prior windows (overall + stages) with delta and per-week rates.
 - Surfaced throughput trend insights in console output and JSON report payloads.
+
+## Iteration 4
+- Added queue reviewer forecasts with throughput-based clearance estimates plus assigned vs unassigned counts.
+- Extended queue CSV exports with reviewer forecasts and updated sample queue data + README usage.
