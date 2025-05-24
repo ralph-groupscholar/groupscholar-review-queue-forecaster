@@ -92,6 +92,30 @@ type ThroughputTrendSummary struct {
 	Trends             []ThroughputTrend `json:"trends"`
 }
 
+type LatencyTrend struct {
+	Label             string  `json:"label"`
+	CurrentCount      int     `json:"current_count"`
+	PriorCount        int     `json:"prior_count"`
+	CurrentAvgDays    float64 `json:"current_avg_days"`
+	PriorAvgDays      float64 `json:"prior_avg_days"`
+	AvgDeltaDays      float64 `json:"avg_delta_days"`
+	AvgDeltaPercent   float64 `json:"avg_delta_percent"`
+	CurrentMedianDays float64 `json:"current_median_days"`
+	PriorMedianDays   float64 `json:"prior_median_days"`
+	MedianDeltaDays   float64 `json:"median_delta_days"`
+	MedianDeltaPct    float64 `json:"median_delta_pct"`
+	Trend             string  `json:"trend"`
+}
+
+type LatencyTrendSummary struct {
+	CurrentWindowStart string          `json:"current_window_start"`
+	CurrentWindowEnd   string          `json:"current_window_end"`
+	PriorWindowStart   string          `json:"prior_window_start"`
+	PriorWindowEnd     string          `json:"prior_window_end"`
+	WindowDays         int             `json:"window_days"`
+	Trends             []LatencyTrend  `json:"trends"`
+}
+
 type QueueStageForecast struct {
 	Stage              string  `json:"stage"`
 	PendingCount       int     `json:"pending_count"`
@@ -140,6 +164,7 @@ type Report struct {
 	SLADays         int                    `json:"sla_days"`
 	Throughput      ThroughputSummary      `json:"throughput"`
 	ThroughputTrend ThroughputTrendSummary `json:"throughput_trend"`
+	LatencyTrend    LatencyTrendSummary    `json:"latency_trend"`
 	Queue           *QueueReport           `json:"queue,omitempty"`
 }
 
@@ -380,6 +405,7 @@ func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, thro
 		return Report{}, err
 	}
 	trend := buildThroughputTrends(events, asOf, throughputDays)
+	latencyTrend := buildLatencyTrends(events, asOf, throughputDays)
 	queueReport := buildQueueReport(queueItems, events, slaDays, throughputDays, asOf, dueSoonRatio)
 
 	return Report{
@@ -391,6 +417,7 @@ func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, thro
 		SLADays:         slaDays,
 		Throughput:      throughput,
 		ThroughputTrend: trend,
+		LatencyTrend:    latencyTrend,
 		Queue:           queueReport,
 	}, nil
 }
@@ -529,6 +556,132 @@ func buildThroughputTrends(events []ReviewEvent, asOf time.Time, throughputDays 
 		WindowDays:         throughputDays,
 		Trends:             trends,
 	}
+}
+
+func buildLatencyTrends(events []ReviewEvent, asOf time.Time, windowDays int) LatencyTrendSummary {
+	if windowDays <= 0 {
+		return LatencyTrendSummary{}
+	}
+	currentStart := asOf.AddDate(0, 0, -windowDays)
+	currentEnd := asOf
+	priorEnd := currentStart
+	priorStart := priorEnd.AddDate(0, 0, -windowDays)
+
+	type durationsByStage map[string][]float64
+	currentDurations := durationsByStage{}
+	priorDurations := durationsByStage{}
+
+	for _, event := range events {
+		days := event.ReviewedAt.Sub(event.SubmittedAt).Hours() / 24
+		switch {
+		case inWindow(event.ReviewedAt, currentStart, currentEnd, true):
+			currentDurations[event.Stage] = append(currentDurations[event.Stage], days)
+		case inWindow(event.ReviewedAt, priorStart, priorEnd, false):
+			priorDurations[event.Stage] = append(priorDurations[event.Stage], days)
+		}
+	}
+
+	labels := map[string]struct{}{}
+	for stage := range currentDurations {
+		labels[stage] = struct{}{}
+	}
+	for stage := range priorDurations {
+		labels[stage] = struct{}{}
+	}
+	labels["overall"] = struct{}{}
+
+	trends := make([]LatencyTrend, 0, len(labels))
+	for stage := range labels {
+		current := currentDurations[stage]
+		prior := priorDurations[stage]
+		if stage == "overall" {
+			current = flattenDurations(currentDurations)
+			prior = flattenDurations(priorDurations)
+		}
+		trends = append(trends, buildLatencyTrend(stage, current, prior))
+	}
+
+	sort.Slice(trends, func(i, j int) bool {
+		if trends[i].Label == "overall" {
+			return true
+		}
+		if trends[j].Label == "overall" {
+			return false
+		}
+		if trends[i].CurrentAvgDays == trends[j].CurrentAvgDays {
+			return trends[i].AvgDeltaDays > trends[j].AvgDeltaDays
+		}
+		return trends[i].CurrentAvgDays > trends[j].CurrentAvgDays
+	})
+
+	return LatencyTrendSummary{
+		CurrentWindowStart: currentStart.Format(time.RFC3339),
+		CurrentWindowEnd:   currentEnd.Format(time.RFC3339),
+		PriorWindowStart:   priorStart.Format(time.RFC3339),
+		PriorWindowEnd:     priorEnd.Format(time.RFC3339),
+		WindowDays:         windowDays,
+		Trends:             trends,
+	}
+}
+
+func buildLatencyTrend(label string, current []float64, prior []float64) LatencyTrend {
+	currentCount := len(current)
+	priorCount := len(prior)
+
+	currentAvg := average(current)
+	priorAvg := average(prior)
+	currentMedian := percentile(current, 50)
+	priorMedian := percentile(prior, 50)
+
+	avgDelta := currentAvg - priorAvg
+	medianDelta := currentMedian - priorMedian
+
+	avgDeltaPct := 0.0
+	if priorAvg > 0 {
+		avgDeltaPct = (avgDelta / priorAvg) * 100
+	}
+	medianDeltaPct := 0.0
+	if priorMedian > 0 {
+		medianDeltaPct = (medianDelta / priorMedian) * 100
+	}
+
+	trend := "flat"
+	switch {
+	case avgDelta > 0.5:
+		trend = "up"
+	case avgDelta < -0.5:
+		trend = "down"
+	}
+
+	return LatencyTrend{
+		Label:             label,
+		CurrentCount:      currentCount,
+		PriorCount:        priorCount,
+		CurrentAvgDays:    round(currentAvg, 2),
+		PriorAvgDays:      round(priorAvg, 2),
+		AvgDeltaDays:      round(avgDelta, 2),
+		AvgDeltaPercent:   round(avgDeltaPct, 1),
+		CurrentMedianDays: round(currentMedian, 2),
+		PriorMedianDays:   round(priorMedian, 2),
+		MedianDeltaDays:   round(medianDelta, 2),
+		MedianDeltaPct:    round(medianDeltaPct, 1),
+		Trend:             trend,
+	}
+}
+
+func flattenDurations(stageDurations map[string][]float64) []float64 {
+	if len(stageDurations) == 0 {
+		return nil
+	}
+	total := 0
+	for _, durations := range stageDurations {
+		total += len(durations)
+	}
+	out := make([]float64, 0, total)
+	for _, durations := range stageDurations {
+		out = append(out, durations...)
+	}
+	return out
 }
 
 func resolveAsOf(events []ReviewEvent, asOfInput string) (time.Time, error) {
@@ -977,6 +1130,9 @@ func writeCSVReports(report Report, output string) error {
 	if err := writeTrendCSV(basePath+"-throughput-trend.csv", report.ThroughputTrend.Trends); err != nil {
 		return err
 	}
+	if err := writeLatencyTrendCSV(basePath+"-latency-trend.csv", report.LatencyTrend.Trends); err != nil {
+		return err
+	}
 	if report.Queue != nil {
 		if err := writeQueueCSV(basePath+"-queue-forecast.csv", report.Queue); err != nil {
 			return err
@@ -1231,6 +1387,45 @@ func writeQueueReviewerCSV(path string, queue *QueueReport) error {
 	return writer.Error()
 }
 
+func writeLatencyTrendCSV(path string, trends []LatencyTrend) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"label", "current_count", "prior_count",
+		"current_avg_days", "prior_avg_days", "avg_delta_days", "avg_delta_percent",
+		"current_median_days", "prior_median_days", "median_delta_days", "median_delta_percent",
+		"trend",
+	}); err != nil {
+		return err
+	}
+	for _, trend := range trends {
+		record := []string{
+			trend.Label,
+			strconv.Itoa(trend.CurrentCount),
+			strconv.Itoa(trend.PriorCount),
+			formatFloat(trend.CurrentAvgDays, 2),
+			formatFloat(trend.PriorAvgDays, 2),
+			formatFloat(trend.AvgDeltaDays, 2),
+			formatFloat(trend.AvgDeltaPercent, 1),
+			formatFloat(trend.CurrentMedianDays, 2),
+			formatFloat(trend.PriorMedianDays, 2),
+			formatFloat(trend.MedianDeltaDays, 2),
+			formatFloat(trend.MedianDeltaPct, 1),
+			trend.Trend,
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
 func formatFloat(value float64, decimals int) string {
 	return strconv.FormatFloat(value, 'f', decimals, 64)
 }
@@ -1257,6 +1452,7 @@ func printReport(report Report, reviewerTop int) {
 
 	printReviewerSnapshot(report.Reviewers, reviewerTop)
 	printThroughputTrends(report.ThroughputTrend)
+	printLatencyTrends(report.LatencyTrend)
 
 	if report.Queue != nil {
 		fmt.Println()
@@ -1366,6 +1562,44 @@ func printThroughputTrends(summary ThroughputTrendSummary) {
 		fmt.Printf("  - %s | Current: %d | Prior: %d | Delta: %+d (%.1f%%) | Trend: %s\n",
 			trend.Label, trend.CurrentCount, trend.PriorCount, trend.Delta, trend.DeltaPercent, trend.Trend)
 		fmt.Printf("    Current: %.2f/week | Prior: %.2f/week\n", trend.CurrentPerWeek, trend.PriorPerWeek)
+		count++
+		if count >= maxStages {
+			break
+		}
+	}
+}
+
+func printLatencyTrends(summary LatencyTrendSummary) {
+	if len(summary.Trends) == 0 {
+		return
+	}
+	maxStages := 5
+	trends := summary.Trends
+
+	fmt.Println()
+	fmt.Println("Latency Trend")
+	fmt.Printf("- Current window: %s to %s (%d days)\n", summary.CurrentWindowStart, summary.CurrentWindowEnd, summary.WindowDays)
+	fmt.Printf("  Prior window: %s to %s\n", summary.PriorWindowStart, summary.PriorWindowEnd)
+
+	fmt.Println("  Overall")
+	for _, trend := range trends {
+		if trend.Label != "overall" {
+			continue
+		}
+		fmt.Printf("  - %s | Avg: %.2f -> %.2f days (%+.2f, %.1f%%) | Median: %.2f -> %.2f days (%+.2f, %.1f%%) | Trend: %s\n",
+			trend.Label, trend.PriorAvgDays, trend.CurrentAvgDays, trend.AvgDeltaDays, trend.AvgDeltaPercent,
+			trend.PriorMedianDays, trend.CurrentMedianDays, trend.MedianDeltaDays, trend.MedianDeltaPct, trend.Trend)
+	}
+
+	fmt.Printf("  Top %d Stages\n", maxStages)
+	count := 0
+	for _, trend := range trends {
+		if trend.Label == "overall" {
+			continue
+		}
+		fmt.Printf("  - %s | Avg: %.2f -> %.2f days (%+.2f, %.1f%%) | Median: %.2f -> %.2f days (%+.2f, %.1f%%) | Trend: %s\n",
+			trend.Label, trend.PriorAvgDays, trend.CurrentAvgDays, trend.AvgDeltaDays, trend.AvgDeltaPercent,
+			trend.PriorMedianDays, trend.CurrentMedianDays, trend.MedianDeltaDays, trend.MedianDeltaPct, trend.Trend)
 		count++
 		if count >= maxStages {
 			break

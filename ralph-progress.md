@@ -15,3 +15,7 @@
 ## Iteration 4
 - Added queue reviewer forecasts with throughput-based clearance estimates plus assigned vs unassigned counts.
 - Extended queue CSV exports with reviewer forecasts and updated sample queue data + README usage.
+
+## Iteration 5
+- Added latency trend comparisons (average + median) across current vs prior windows, including JSON, console, and CSV outputs.
+- Exported latency trend summaries to CSV alongside existing throughput and queue forecasts.

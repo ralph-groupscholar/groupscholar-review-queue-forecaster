@@ -9,6 +9,7 @@ Local-first CLI that estimates review latency, SLA breach risk, reviewer coverag
 - Aging buckets (on time, at risk, overdue) with risk tiers
 - Reviewer throughput snapshots with last-reviewed timestamp
 - Throughput trend comparison versus prior window (overall + top stages)
+- Latency trend comparison versus prior window (average + median by stage)
 - Queue forecast with due-soon/overdue counts, clearance estimates, and assigned vs unassigned split
 - Reviewer-level queue forecast with throughput-based clear days
 - JSON output for downstream reporting
