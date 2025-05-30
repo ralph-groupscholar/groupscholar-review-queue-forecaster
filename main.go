@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -108,12 +109,12 @@ type LatencyTrend struct {
 }
 
 type LatencyTrendSummary struct {
-	CurrentWindowStart string          `json:"current_window_start"`
-	CurrentWindowEnd   string          `json:"current_window_end"`
-	PriorWindowStart   string          `json:"prior_window_start"`
-	PriorWindowEnd     string          `json:"prior_window_end"`
-	WindowDays         int             `json:"window_days"`
-	Trends             []LatencyTrend  `json:"trends"`
+	CurrentWindowStart string         `json:"current_window_start"`
+	CurrentWindowEnd   string         `json:"current_window_end"`
+	PriorWindowStart   string         `json:"prior_window_start"`
+	PriorWindowEnd     string         `json:"prior_window_end"`
+	WindowDays         int            `json:"window_days"`
+	Trends             []LatencyTrend `json:"trends"`
 }
 
 type QueueStageForecast struct {
@@ -178,7 +179,29 @@ func main() {
 	jsonOutput := flag.Bool("json", false, "Emit JSON output")
 	csvOut := flag.String("csv-out", "", "Write CSV summaries using this path prefix or directory")
 	reviewerTop := flag.Int("reviewer-top", 5, "Top reviewers to show by throughput")
+	storeDB := flag.Bool("store-db", false, "Store report in Postgres when DB url is available")
+	dbURL := flag.String("db-url", "", "Postgres connection string (or GS_REVIEW_QUEUE_DB_URL env var)")
+	dbSchema := flag.String("db-schema", "gs_review_queue_forecaster", "Database schema for stored runs")
+	dbInit := flag.Bool("db-init", false, "Initialize database schema and seed data")
+	dbList := flag.String("db-list", "", "List recent saved runs (optional limit, default 5)")
 	flag.Parse()
+
+	if *dbInit {
+		if err := initDatabase(*dbURL, *dbSchema); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to init database: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Database initialized and seed data verified.")
+	}
+
+	if strings.TrimSpace(*dbList) != "" {
+		limit := parseLimit(*dbList)
+		if err := listDatabaseRuns(*dbURL, *dbSchema, limit); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to list database runs: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	events, err := loadEvents(*inputPath)
 	if err != nil {
@@ -214,6 +237,13 @@ func main() {
 		}
 		fmt.Println(string(payload))
 		return
+	}
+
+	if *storeDB {
+		if err := saveReportToDB(*dbURL, *dbSchema, report, *inputPath, *queuePath, *throughputDays); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to store report: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	printReport(report, *reviewerTop)
@@ -1626,4 +1656,141 @@ func init() {
 		fmt.Fprintf(flag.CommandLine.Output(), "\nCSV columns required: application_id, stage, submitted_at, reviewed_at, reviewer_id\n")
 		fmt.Fprintf(flag.CommandLine.Output(), "Date formats accepted: RFC3339, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS\n")
 	}
+}
+
+func sanitizePath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return filepath.Base(value)
+}
+
+func initDatabase(dbURL string, schema string) error {
+	cfg, err := resolveDBConfig(dbURL, schema)
+	if err != nil {
+		return err
+	}
+	db, err := openDB(cfg)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := ensureSchema(ctx, db, cfg.Schema); err != nil {
+		return err
+	}
+	if err := ensureRunsTable(ctx, db, cfg.Schema); err != nil {
+		return err
+	}
+	_, err = seedRuns(ctx, db, cfg.Schema)
+	return err
+}
+
+func saveReportToDB(dbURL string, schema string, report Report, inputPath string, queuePath string, throughputDays int) error {
+	cfg, err := resolveDBConfig(dbURL, schema)
+	if err != nil {
+		return err
+	}
+	db, err := openDB(cfg)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := ensureSchema(ctx, db, cfg.Schema); err != nil {
+		return err
+	}
+	if err := ensureRunsTable(ctx, db, cfg.Schema); err != nil {
+		return err
+	}
+
+	generatedAt, err := time.Parse(time.RFC3339, report.GeneratedAt)
+	if err != nil {
+		generatedAt = time.Now()
+	}
+
+	reportJSON, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	queueJSON := []byte(nil)
+	if report.Queue != nil {
+		queueSummary := map[string]int{
+			"total_pending":    report.Queue.TotalPending,
+			"assigned_count":   report.Queue.AssignedCount,
+			"unassigned_count": report.Queue.UnassignedCount,
+			"overdue_count":    report.Queue.OverdueCount,
+			"due_soon_count":   report.Queue.DueSoonCount,
+			"on_track_count":   report.Queue.OnTrackCount,
+		}
+		queueJSON, err = json.Marshal(queueSummary)
+		if err != nil {
+			return err
+		}
+	}
+
+	insert := RunInsert{
+		GeneratedAt:    generatedAt,
+		InputPath:      sanitizePath(inputPath),
+		QueuePath:      sanitizePath(queuePath),
+		SLADays:        report.SLADays,
+		ThroughputDays: throughputDays,
+		TotalEvents:    report.TotalEvents,
+		ReportJSON:     reportJSON,
+		QueueJSON:      queueJSON,
+	}
+	return insertRun(ctx, db, cfg.Schema, insert)
+}
+
+func listDatabaseRuns(dbURL string, schema string, limit int) error {
+	cfg, err := resolveDBConfig(dbURL, schema)
+	if err != nil {
+		return err
+	}
+	db, err := openDB(cfg)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := ensureSchema(ctx, db, cfg.Schema); err != nil {
+		return err
+	}
+	if err := ensureRunsTable(ctx, db, cfg.Schema); err != nil {
+		return err
+	}
+
+	runs, err := listRuns(ctx, db, cfg.Schema, limit)
+	if err != nil {
+		return err
+	}
+
+	if len(runs) == 0 {
+		fmt.Println("No saved runs found.")
+		return nil
+	}
+	fmt.Printf("Recent Runs (schema: %s)\n", cfg.Schema)
+	for _, run := range runs {
+		pending := ""
+		if run.QueuePending.Valid {
+			pending = fmt.Sprintf(" | Pending: %d", run.QueuePending.Int64)
+		}
+		overdue := ""
+		if run.QueueOverdue.Valid {
+			overdue = fmt.Sprintf(" | Overdue: %d", run.QueueOverdue.Int64)
+		}
+		fmt.Printf("- #%d | Generated: %s | Events: %d | SLA: %d | Window: %d%s%s\n",
+			run.ID, run.GeneratedAt.Format(time.RFC3339), run.TotalEvents, run.SLADays, run.Throughput, pending, overdue)
+	}
+	return nil
 }

@@ -17,5 +17,9 @@
 - Extended queue CSV exports with reviewer forecasts and updated sample queue data + README usage.
 
 ## Iteration 5
-- Added latency trend comparisons (average + median) across current vs prior windows, including JSON, console, and CSV outputs.
-- Exported latency trend summaries to CSV alongside existing throughput and queue forecasts.
+- Added Postgres persistence with schema/table setup, seed run data, and CLI commands to init, save, and list stored runs.
+- Updated documentation with database usage and persistence workflow.
+
+## Iteration 6
+- Standardized the Postgres schema name and environment variable expectations for production storage.
+- Refined database docs and error messaging, and verified production seed data initialization.

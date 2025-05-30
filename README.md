@@ -1,6 +1,6 @@
 # Group Scholar Review Queue Forecaster
 
-Local-first CLI that estimates review latency, SLA breach risk, reviewer coverage, and queue clearance projections from review event CSVs.
+Local-first CLI that estimates review latency, SLA breach risk, reviewer coverage, queue clearance projections, and persists run snapshots to Postgres.
 
 ## Features
 - Stage-level latency stats (average, median, p90, max)
@@ -9,10 +9,11 @@ Local-first CLI that estimates review latency, SLA breach risk, reviewer coverag
 - Aging buckets (on time, at risk, overdue) with risk tiers
 - Reviewer throughput snapshots with last-reviewed timestamp
 - Throughput trend comparison versus prior window (overall + top stages)
-- Latency trend comparison versus prior window (average + median by stage)
+- Latency trend comparison between windows (overall + top stages)
 - Queue forecast with due-soon/overdue counts, clearance estimates, and assigned vs unassigned split
 - Reviewer-level queue forecast with throughput-based clear days
 - JSON output for downstream reporting
+- Postgres persistence with seed data for live dashboards
 
 ## Quickstart
 ```bash
@@ -37,6 +38,21 @@ go run . --input data/sample-events.csv --queue data/sample-queue.csv
 
 ```bash
 go run . --input data/sample-events.csv --queue data/sample-queue.csv --csv-out exports/review-queue
+```
+
+## Postgres Persistence
+Set `GS_REVIEW_QUEUE_DB_URL` (production only) or pass `--db-url` to store run snapshots. The CLI creates a schema + table and seeds a sample run if the table is empty.
+
+```bash
+go run . --db-init
+```
+
+```bash
+go run . --input data/sample-events.csv --queue data/sample-queue.csv --store-db
+```
+
+```bash
+go run . --db-list 10
 ```
 
 ## CSV Format
@@ -70,5 +86,6 @@ Overall
 ```
 
 ## Next Ideas
+- Add a small web UI that charts saved runs from Postgres.
 - Flag stages with rising latency versus prior weeks.
 - Export CSV summaries for weekly ops reviews.
