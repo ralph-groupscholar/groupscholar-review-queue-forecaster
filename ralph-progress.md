@@ -27,3 +27,7 @@
 ## Iteration 7
 - Added queue clearance capacity planning with target clear-days, throughput gaps, and capacity status signals.
 - Extended queue CSV output, console summary, and seed data to include the new capacity plan.
+
+## Iteration 8
+- Added an insight deck that flags SLA risk, throughput slowdowns, latency regression, and queue coverage gaps.
+- Extended CLI output and JSON payloads with the new insight summaries plus added tests.

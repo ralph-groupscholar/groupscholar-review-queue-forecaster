@@ -10,6 +10,7 @@ Local-first CLI that estimates review latency, SLA breach risk, reviewer coverag
 - Reviewer throughput snapshots with last-reviewed timestamp
 - Throughput trend comparison versus prior window (overall + top stages)
 - Latency trend comparison between windows (overall + top stages)
+- Insight deck highlighting SLA, throughput, latency, and queue risks
 - Queue forecast with due-soon/overdue counts, clearance estimates, and assigned vs unassigned split
 - Queue clearance capacity plan with target clear-days and throughput gaps
 - Reviewer-level queue forecast with throughput-based clear days

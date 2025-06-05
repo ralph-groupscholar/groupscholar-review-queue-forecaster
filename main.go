@@ -157,6 +157,7 @@ type QueueReport struct {
 	AvgAgeDays      float64                 `json:"avg_age_days"`
 	Stages          []QueueStageForecast    `json:"stages"`
 	Reviewers       []QueueReviewerForecast `json:"reviewers"`
+	PriorityItems   []QueuePriorityItem     `json:"priority_items"`
 	ThroughputDays  int                     `json:"throughput_days"`
 	DueSoonRatio    float64                 `json:"due_soon_ratio"`
 	ClearancePlan   *QueueClearancePlan     `json:"clearance_plan,omitempty"`
@@ -173,6 +174,17 @@ type QueueClearancePlan struct {
 	Status         string  `json:"status"`
 }
 
+type QueuePriorityItem struct {
+	ApplicationID string  `json:"application_id"`
+	Stage         string  `json:"stage"`
+	ReviewerID    string  `json:"reviewer_id"`
+	SubmittedAt   string  `json:"submitted_at"`
+	AgeDays       float64 `json:"age_days"`
+	DaysToSLA     float64 `json:"days_to_sla"`
+	UrgencyScore  float64 `json:"urgency_score"`
+	Status        string  `json:"status"`
+}
+
 type Report struct {
 	GeneratedAt     string                 `json:"generated_at"`
 	TotalEvents     int                    `json:"total_events"`
@@ -183,7 +195,15 @@ type Report struct {
 	Throughput      ThroughputSummary      `json:"throughput"`
 	ThroughputTrend ThroughputTrendSummary `json:"throughput_trend"`
 	LatencyTrend    LatencyTrendSummary    `json:"latency_trend"`
+	Insights        []Insight              `json:"insights"`
 	Queue           *QueueReport           `json:"queue,omitempty"`
+}
+
+type Insight struct {
+	Severity string `json:"severity"`
+	Area     string `json:"area"`
+	Message  string `json:"message"`
+	Metric   string `json:"metric"`
 }
 
 func main() {
@@ -194,6 +214,7 @@ func main() {
 	asOfInput := flag.String("as-of", "", "As-of date for throughput window (defaults to latest reviewed_at)")
 	dueSoonRatio := flag.Float64("due-soon-ratio", 0.8, "Fraction of SLA days considered due soon")
 	targetClearDays := flag.Int("target-clear-days", 14, "Target days to clear the pending queue for capacity planning")
+	queuePriorityTop := flag.Int("queue-priority-top", 10, "Top queue items to show in priority list")
 	jsonOutput := flag.Bool("json", false, "Emit JSON output")
 	csvOut := flag.String("csv-out", "", "Write CSV summaries using this path prefix or directory")
 	reviewerTop := flag.Int("reviewer-top", 5, "Top reviewers to show by throughput")
@@ -236,7 +257,7 @@ func main() {
 		}
 	}
 
-	report, err := buildReport(events, queueItems, *slaDays, *throughputDays, *asOfInput, *dueSoonRatio, *targetClearDays)
+	report, err := buildReport(events, queueItems, *slaDays, *throughputDays, *asOfInput, *dueSoonRatio, *targetClearDays, *queuePriorityTop)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build report: %v\n", err)
 		os.Exit(1)
@@ -428,7 +449,7 @@ func parseDate(value string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unsupported format: %s", value)
 }
 
-func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, throughputDays int, asOfInput string, dueSoonRatio float64, targetClearDays int) (Report, error) {
+func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, throughputDays int, asOfInput string, dueSoonRatio float64, targetClearDays int, queuePriorityTop int) (Report, error) {
 	stageBuckets := map[string][]ReviewEvent{}
 	for _, event := range events {
 		stageBuckets[event.Stage] = append(stageBuckets[event.Stage], event)
@@ -454,7 +475,8 @@ func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, thro
 	}
 	trend := buildThroughputTrends(events, asOf, throughputDays)
 	latencyTrend := buildLatencyTrends(events, asOf, throughputDays)
-	queueReport := buildQueueReport(queueItems, events, slaDays, throughputDays, asOf, dueSoonRatio, targetClearDays)
+	queueReport := buildQueueReport(queueItems, events, slaDays, throughputDays, asOf, dueSoonRatio, targetClearDays, queuePriorityTop)
+	insights := buildInsights(overall, stages, trend, latencyTrend, queueReport, slaDays)
 
 	return Report{
 		GeneratedAt:     time.Now().Format(time.RFC3339),
@@ -466,6 +488,7 @@ func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, thro
 		Throughput:      throughput,
 		ThroughputTrend: trend,
 		LatencyTrend:    latencyTrend,
+		Insights:        insights,
 		Queue:           queueReport,
 	}, nil
 }
@@ -748,7 +771,7 @@ func resolveAsOf(events []ReviewEvent, asOfInput string) (time.Time, error) {
 	return max, nil
 }
 
-func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int, throughputDays int, asOf time.Time, dueSoonRatio float64, targetClearDays int) *QueueReport {
+func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int, throughputDays int, asOf time.Time, dueSoonRatio float64, targetClearDays int, queuePriorityTop int) *QueueReport {
 	if len(queueItems) == 0 {
 		return nil
 	}
@@ -757,6 +780,9 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 	}
 	if targetClearDays < 0 {
 		targetClearDays = 0
+	}
+	if queuePriorityTop < 0 {
+		queuePriorityTop = 0
 	}
 	dueSoonThreshold := float64(slaDays) * dueSoonRatio
 
@@ -913,6 +939,7 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 		}
 	}
 	reviewers := buildQueueReviewerForecasts(reviewerBuckets, reviewerThroughput, slaDays, throughputDays, asOf, dueSoonThreshold)
+	priorityItems := buildQueuePriorityItems(queueItems, slaDays, dueSoonThreshold, asOf, queuePriorityTop)
 
 	clearancePlan := buildClearancePlan(totalPending, totalWindowCount, throughputDays, targetClearDays)
 
@@ -927,6 +954,7 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 		AvgAgeDays:      round(avgAge, 2),
 		Stages:          stages,
 		Reviewers:       reviewers,
+		PriorityItems:   priorityItems,
 		ThroughputDays:  throughputDays,
 		DueSoonRatio:    dueSoonRatio,
 		ClearancePlan:   clearancePlan,
@@ -1005,6 +1033,63 @@ func buildQueueReviewerForecasts(reviewerBuckets map[string][]QueueItem, reviewe
 		return reviewers[i].PendingCount > reviewers[j].PendingCount
 	})
 	return reviewers
+}
+
+func buildQueuePriorityItems(queueItems []QueueItem, slaDays int, dueSoonThreshold float64, asOf time.Time, top int) []QueuePriorityItem {
+	if len(queueItems) == 0 {
+		return nil
+	}
+	if top <= 0 {
+		top = 10
+	}
+	items := make([]QueuePriorityItem, 0, len(queueItems))
+	sla := float64(slaDays)
+	for _, item := range queueItems {
+		ageDays := asOf.Sub(item.SubmittedAt).Hours() / 24
+		if ageDays < 0 {
+			ageDays = 0
+		}
+		daysToSLA := sla - ageDays
+		score := 0.0
+		status := "on track"
+		switch {
+		case ageDays >= sla:
+			score = 2.0 + (ageDays-sla)/sla
+			status = "overdue"
+		case ageDays >= dueSoonThreshold:
+			score = 1.0 + (ageDays / sla)
+			status = "due soon"
+		default:
+			score = ageDays / sla
+		}
+		reviewerID := strings.TrimSpace(item.ReviewerID)
+		if reviewerID == "" {
+			reviewerID = "unassigned"
+			score += 0.3
+		}
+		items = append(items, QueuePriorityItem{
+			ApplicationID: item.ApplicationID,
+			Stage:         item.Stage,
+			ReviewerID:    reviewerID,
+			SubmittedAt:   item.SubmittedAt.Format(time.RFC3339),
+			AgeDays:       round(ageDays, 2),
+			DaysToSLA:     round(daysToSLA, 2),
+			UrgencyScore:  round(score, 2),
+			Status:        status,
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].UrgencyScore == items[j].UrgencyScore {
+			return items[i].AgeDays > items[j].AgeDays
+		}
+		return items[i].UrgencyScore > items[j].UrgencyScore
+	})
+
+	if len(items) > top {
+		items = items[:top]
+	}
+	return items
 }
 
 func buildReviewerStats(events []ReviewEvent, slaDays int, windowStart time.Time, asOf time.Time, throughputDays int) []ReviewerStats {
@@ -1553,6 +1638,7 @@ func printReport(report Report, reviewerTop int) {
 	printReviewerSnapshot(report.Reviewers, reviewerTop)
 	printThroughputTrends(report.ThroughputTrend)
 	printLatencyTrends(report.LatencyTrend)
+	printInsights(report.Insights)
 
 	if report.Queue != nil {
 		fmt.Println()
@@ -1592,6 +1678,17 @@ func printReport(report Report, reviewerTop int) {
 					reviewer.ThroughputPerWeek, reviewer.EstimatedClearDays, reviewer.ClearanceStatus)
 			}
 		}
+	}
+}
+
+func printInsights(insights []Insight) {
+	if len(insights) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Insights")
+	for _, insight := range insights {
+		fmt.Printf("- [%s] %s (%s)\n", strings.ToUpper(insight.Severity), insight.Message, insight.Metric)
 	}
 }
 
@@ -1766,6 +1863,100 @@ func buildClearancePlan(totalPending int, windowCount int, throughputDays int, t
 		GapWeekly:      round(gapWeekly, 2),
 		Status:         status,
 	}
+}
+
+func buildInsights(overall StageStats, stages []StageStats, throughputTrend ThroughputTrendSummary, latencyTrend LatencyTrendSummary, queue *QueueReport, slaDays int) []Insight {
+	insights := make([]Insight, 0, 8)
+	add := func(severity, area, message, metric string) {
+		if len(insights) >= 8 {
+			return
+		}
+		insights = append(insights, Insight{
+			Severity: severity,
+			Area:     area,
+			Message:  message,
+			Metric:   metric,
+		})
+	}
+
+	if overall.Count > 0 {
+		metric := fmt.Sprintf("breach %.1f%% | avg %.2f days", overall.SLABreachRate, overall.AverageDays)
+		if overall.RiskTier == "high" || overall.SLABreachRate >= 30 {
+			add("high", "overall", "SLA risk is elevated across the full review queue.", metric)
+		} else if overall.RiskTier == "medium" || overall.SLABreachRate >= 20 {
+			add("medium", "overall", "SLA risk is trending up across the full review queue.", metric)
+		}
+	}
+
+	stageCount := 0
+	for _, stage := range stages {
+		if stage.Count == 0 {
+			continue
+		}
+		if stage.RiskTier == "low" && stage.AverageDays < float64(slaDays) && stage.SLABreachRate < 20 {
+			continue
+		}
+		severity := "medium"
+		if stage.RiskTier == "high" || stage.SLABreachRate >= 35 || stage.AverageDays >= float64(slaDays)*1.2 {
+			severity = "high"
+		}
+		metric := fmt.Sprintf("breach %.1f%% | avg %.2f days", stage.SLABreachRate, stage.AverageDays)
+		add(severity, "stage", fmt.Sprintf("Stage %s is driving delay risk.", stage.Stage), metric)
+		stageCount++
+		if stageCount >= 3 {
+			break
+		}
+	}
+
+	for _, trend := range throughputTrend.Trends {
+		if trend.Label != "overall" {
+			continue
+		}
+		if trend.DeltaPercent <= -20 || trend.Trend == "down" {
+			metric := fmt.Sprintf("delta %+d (%.1f%%) | current %.2f/week", trend.Delta, trend.DeltaPercent, trend.CurrentPerWeek)
+			severity := "medium"
+			if trend.DeltaPercent <= -30 {
+				severity = "high"
+			}
+			add(severity, "throughput", "Throughput is slowing versus the prior window.", metric)
+		}
+		break
+	}
+
+	for _, trend := range latencyTrend.Trends {
+		if trend.Label != "overall" {
+			continue
+		}
+		if trend.AvgDeltaDays >= 1.0 || trend.Trend == "up" {
+			metric := fmt.Sprintf("avg %+0.2f days | median %+0.2f days", trend.AvgDeltaDays, trend.MedianDeltaDays)
+			severity := "medium"
+			if trend.AvgDeltaDays >= 2.0 {
+				severity = "high"
+			}
+			add(severity, "latency", "Latency is worsening compared with the prior window.", metric)
+		}
+		break
+	}
+
+	if queue != nil {
+		if queue.OverdueCount > 0 {
+			metric := fmt.Sprintf("overdue %d | due soon %d", queue.OverdueCount, queue.DueSoonCount)
+			add("high", "queue", "There are overdue items in the active queue.", metric)
+		}
+		if queue.ClearancePlan != nil && queue.ClearancePlan.Status == "critical" {
+			metric := fmt.Sprintf("gap %.2f/day | target %d days", queue.ClearancePlan.GapDaily, queue.ClearancePlan.TargetDays)
+			add("high", "capacity", "Current throughput is below the clearance target.", metric)
+		}
+		if queue.TotalPending > 0 {
+			unassignedRatio := float64(queue.UnassignedCount) / float64(queue.TotalPending)
+			if unassignedRatio >= 0.4 {
+				metric := fmt.Sprintf("unassigned %.1f%% of queue", unassignedRatio*100)
+				add("medium", "coverage", "Large share of the queue is unassigned.", metric)
+			}
+		}
+	}
+
+	return insights
 }
 
 func init() {
