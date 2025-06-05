@@ -23,3 +23,7 @@
 ## Iteration 6
 - Standardized the Postgres schema name and environment variable expectations for production storage.
 - Refined database docs and error messaging, and verified production seed data initialization.
+
+## Iteration 7
+- Added queue clearance capacity planning with target clear-days, throughput gaps, and capacity status signals.
+- Extended queue CSV output, console summary, and seed data to include the new capacity plan.

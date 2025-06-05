@@ -146,6 +146,16 @@ func seedRuns(ctx context.Context, db *sql.DB, schema string) (bool, error) {
 			AvgAgeDays:      5.3,
 			ThroughputDays:  28,
 			DueSoonRatio:    0.8,
+			ClearancePlan: &QueueClearancePlan{
+				TargetDays:     14,
+				RequiredDaily:  1.29,
+				RequiredWeekly: 9.03,
+				CurrentDaily:   1.5,
+				CurrentWeekly:  10.5,
+				GapDaily:       -0.21,
+				GapWeekly:      -1.47,
+				Status:         "on track",
+			},
 		},
 	}
 	seedQueueSummary := map[string]int{"total_pending": 18, "assigned_count": 12, "unassigned_count": 6, "overdue_count": 4}

@@ -11,6 +11,7 @@ Local-first CLI that estimates review latency, SLA breach risk, reviewer coverag
 - Throughput trend comparison versus prior window (overall + top stages)
 - Latency trend comparison between windows (overall + top stages)
 - Queue forecast with due-soon/overdue counts, clearance estimates, and assigned vs unassigned split
+- Queue clearance capacity plan with target clear-days and throughput gaps
 - Reviewer-level queue forecast with throughput-based clear days
 - JSON output for downstream reporting
 - Postgres persistence with seed data for live dashboards
@@ -38,6 +39,10 @@ go run . --input data/sample-events.csv --queue data/sample-queue.csv
 
 ```bash
 go run . --input data/sample-events.csv --queue data/sample-queue.csv --csv-out exports/review-queue
+```
+
+```bash
+go run . --input data/sample-events.csv --queue data/sample-queue.csv --target-clear-days 10
 ```
 
 ## Postgres Persistence

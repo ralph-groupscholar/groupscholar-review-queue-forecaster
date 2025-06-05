@@ -118,15 +118,20 @@ type LatencyTrendSummary struct {
 }
 
 type QueueStageForecast struct {
-	Stage              string  `json:"stage"`
-	PendingCount       int     `json:"pending_count"`
-	AvgAgeDays         float64 `json:"avg_age_days"`
-	OverdueCount       int     `json:"overdue_count"`
-	DueSoonCount       int     `json:"due_soon_count"`
-	OnTrackCount       int     `json:"on_track_count"`
-	DailyThroughput    float64 `json:"daily_throughput"`
-	EstimatedClearDays float64 `json:"estimated_clear_days"`
-	ClearanceStatus    string  `json:"clearance_status"`
+	Stage                    string  `json:"stage"`
+	PendingCount             int     `json:"pending_count"`
+	AvgAgeDays               float64 `json:"avg_age_days"`
+	OverdueCount             int     `json:"overdue_count"`
+	DueSoonCount             int     `json:"due_soon_count"`
+	OnTrackCount             int     `json:"on_track_count"`
+	DailyThroughput          float64 `json:"daily_throughput"`
+	EstimatedClearDays       float64 `json:"estimated_clear_days"`
+	ClearanceStatus          string  `json:"clearance_status"`
+	RequiredDailyThroughput  float64 `json:"required_daily_throughput"`
+	RequiredWeeklyThroughput float64 `json:"required_weekly_throughput"`
+	ThroughputGapDaily       float64 `json:"throughput_gap_daily"`
+	ThroughputGapWeekly      float64 `json:"throughput_gap_weekly"`
+	CapacityStatus           string  `json:"capacity_status"`
 }
 
 type QueueReviewerForecast struct {
@@ -154,6 +159,18 @@ type QueueReport struct {
 	Reviewers       []QueueReviewerForecast `json:"reviewers"`
 	ThroughputDays  int                     `json:"throughput_days"`
 	DueSoonRatio    float64                 `json:"due_soon_ratio"`
+	ClearancePlan   *QueueClearancePlan     `json:"clearance_plan,omitempty"`
+}
+
+type QueueClearancePlan struct {
+	TargetDays     int     `json:"target_days"`
+	RequiredDaily  float64 `json:"required_daily"`
+	RequiredWeekly float64 `json:"required_weekly"`
+	CurrentDaily   float64 `json:"current_daily"`
+	CurrentWeekly  float64 `json:"current_weekly"`
+	GapDaily       float64 `json:"gap_daily"`
+	GapWeekly      float64 `json:"gap_weekly"`
+	Status         string  `json:"status"`
 }
 
 type Report struct {
@@ -176,6 +193,7 @@ func main() {
 	throughputDays := flag.Int("throughput-days", 28, "Window in days for throughput metrics")
 	asOfInput := flag.String("as-of", "", "As-of date for throughput window (defaults to latest reviewed_at)")
 	dueSoonRatio := flag.Float64("due-soon-ratio", 0.8, "Fraction of SLA days considered due soon")
+	targetClearDays := flag.Int("target-clear-days", 14, "Target days to clear the pending queue for capacity planning")
 	jsonOutput := flag.Bool("json", false, "Emit JSON output")
 	csvOut := flag.String("csv-out", "", "Write CSV summaries using this path prefix or directory")
 	reviewerTop := flag.Int("reviewer-top", 5, "Top reviewers to show by throughput")
@@ -218,7 +236,7 @@ func main() {
 		}
 	}
 
-	report, err := buildReport(events, queueItems, *slaDays, *throughputDays, *asOfInput, *dueSoonRatio)
+	report, err := buildReport(events, queueItems, *slaDays, *throughputDays, *asOfInput, *dueSoonRatio, *targetClearDays)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build report: %v\n", err)
 		os.Exit(1)
@@ -410,7 +428,7 @@ func parseDate(value string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unsupported format: %s", value)
 }
 
-func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, throughputDays int, asOfInput string, dueSoonRatio float64) (Report, error) {
+func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, throughputDays int, asOfInput string, dueSoonRatio float64, targetClearDays int) (Report, error) {
 	stageBuckets := map[string][]ReviewEvent{}
 	for _, event := range events {
 		stageBuckets[event.Stage] = append(stageBuckets[event.Stage], event)
@@ -436,7 +454,7 @@ func buildReport(events []ReviewEvent, queueItems []QueueItem, slaDays int, thro
 	}
 	trend := buildThroughputTrends(events, asOf, throughputDays)
 	latencyTrend := buildLatencyTrends(events, asOf, throughputDays)
-	queueReport := buildQueueReport(queueItems, events, slaDays, throughputDays, asOf, dueSoonRatio)
+	queueReport := buildQueueReport(queueItems, events, slaDays, throughputDays, asOf, dueSoonRatio, targetClearDays)
 
 	return Report{
 		GeneratedAt:     time.Now().Format(time.RFC3339),
@@ -730,12 +748,15 @@ func resolveAsOf(events []ReviewEvent, asOfInput string) (time.Time, error) {
 	return max, nil
 }
 
-func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int, throughputDays int, asOf time.Time, dueSoonRatio float64) *QueueReport {
+func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int, throughputDays int, asOf time.Time, dueSoonRatio float64, targetClearDays int) *QueueReport {
 	if len(queueItems) == 0 {
 		return nil
 	}
 	if dueSoonRatio <= 0 || dueSoonRatio >= 1 {
 		dueSoonRatio = 0.8
+	}
+	if targetClearDays < 0 {
+		targetClearDays = 0
 	}
 	dueSoonThreshold := float64(slaDays) * dueSoonRatio
 
@@ -776,6 +797,14 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 
 	stages := make([]QueueStageForecast, 0, len(stageBuckets))
 	windowStart := asOf.AddDate(0, 0, -throughputDays)
+	totalWindowCount := 0
+	if throughputDays > 0 {
+		for _, event := range events {
+			if !event.ReviewedAt.Before(windowStart) && !event.ReviewedAt.After(asOf) {
+				totalWindowCount++
+			}
+		}
+	}
 	for stage, items := range stageBuckets {
 		pending := len(items)
 		var ageSum float64
@@ -831,16 +860,30 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 			avgAge = ageSum / float64(pending)
 		}
 
+		requiredDaily := 0.0
+		requiredWeekly := 0.0
+		capacityStatus := "no target set"
+		if targetClearDays > 0 {
+			requiredDaily = float64(pending) / float64(targetClearDays)
+			requiredWeekly = requiredDaily * 7.0
+			capacityStatus = classifyCapacity(dailyThroughput, requiredDaily)
+		}
+
 		stages = append(stages, QueueStageForecast{
-			Stage:              stage,
-			PendingCount:       pending,
-			AvgAgeDays:         round(avgAge, 2),
-			OverdueCount:       stageOverdue,
-			DueSoonCount:       stageDueSoon,
-			OnTrackCount:       stageOnTrack,
-			DailyThroughput:    round(dailyThroughput, 2),
-			EstimatedClearDays: round(estimatedClear, 2),
-			ClearanceStatus:    clearanceStatus,
+			Stage:                    stage,
+			PendingCount:             pending,
+			AvgAgeDays:               round(avgAge, 2),
+			OverdueCount:             stageOverdue,
+			DueSoonCount:             stageDueSoon,
+			OnTrackCount:             stageOnTrack,
+			DailyThroughput:          round(dailyThroughput, 2),
+			EstimatedClearDays:       round(estimatedClear, 2),
+			ClearanceStatus:          clearanceStatus,
+			RequiredDailyThroughput:  round(requiredDaily, 2),
+			RequiredWeeklyThroughput: round(requiredWeekly, 2),
+			ThroughputGapDaily:       round(requiredDaily-dailyThroughput, 2),
+			ThroughputGapWeekly:      round(requiredWeekly-(dailyThroughput*7.0), 2),
+			CapacityStatus:           capacityStatus,
 		})
 	}
 
@@ -871,6 +914,8 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 	}
 	reviewers := buildQueueReviewerForecasts(reviewerBuckets, reviewerThroughput, slaDays, throughputDays, asOf, dueSoonThreshold)
 
+	clearancePlan := buildClearancePlan(totalPending, totalWindowCount, throughputDays, targetClearDays)
+
 	return &QueueReport{
 		AsOf:            asOf.Format(time.RFC3339),
 		TotalPending:    totalPending,
@@ -884,6 +929,7 @@ func buildQueueReport(queueItems []QueueItem, events []ReviewEvent, slaDays int,
 		Reviewers:       reviewers,
 		ThroughputDays:  throughputDays,
 		DueSoonRatio:    dueSoonRatio,
+		ClearancePlan:   clearancePlan,
 	}
 }
 
@@ -1338,9 +1384,23 @@ func writeQueueCSV(path string, queue *QueueReport) error {
 	if err := writer.Write([]string{
 		"stage", "pending_count", "avg_age_days", "overdue_count", "due_soon_count",
 		"on_track_count", "daily_throughput", "estimated_clear_days", "clearance_status",
+		"required_daily_throughput", "required_weekly_throughput",
+		"throughput_gap_daily", "throughput_gap_weekly", "capacity_status",
 		"assigned_count", "unassigned_count",
 	}); err != nil {
 		return err
+	}
+	overallRequiredDaily := ""
+	overallRequiredWeekly := ""
+	overallGapDaily := ""
+	overallGapWeekly := ""
+	overallCapacity := ""
+	if queue.ClearancePlan != nil {
+		overallRequiredDaily = formatFloat(queue.ClearancePlan.RequiredDaily, 2)
+		overallRequiredWeekly = formatFloat(queue.ClearancePlan.RequiredWeekly, 2)
+		overallGapDaily = formatFloat(queue.ClearancePlan.GapDaily, 2)
+		overallGapWeekly = formatFloat(queue.ClearancePlan.GapWeekly, 2)
+		overallCapacity = queue.ClearancePlan.Status
 	}
 	overall := []string{
 		"overall",
@@ -1352,6 +1412,11 @@ func writeQueueCSV(path string, queue *QueueReport) error {
 		"",
 		"",
 		"",
+		overallRequiredDaily,
+		overallRequiredWeekly,
+		overallGapDaily,
+		overallGapWeekly,
+		overallCapacity,
 		strconv.Itoa(queue.AssignedCount),
 		strconv.Itoa(queue.UnassignedCount),
 	}
@@ -1369,6 +1434,11 @@ func writeQueueCSV(path string, queue *QueueReport) error {
 			formatFloat(stage.DailyThroughput, 2),
 			formatFloat(stage.EstimatedClearDays, 2),
 			stage.ClearanceStatus,
+			formatFloat(stage.RequiredDailyThroughput, 2),
+			formatFloat(stage.RequiredWeeklyThroughput, 2),
+			formatFloat(stage.ThroughputGapDaily, 2),
+			formatFloat(stage.ThroughputGapWeekly, 2),
+			stage.CapacityStatus,
 			"",
 			"",
 		}
@@ -1491,12 +1561,21 @@ func printReport(report Report, reviewerTop int) {
 			report.Queue.AsOf, report.Queue.TotalPending, report.Queue.AssignedCount, report.Queue.UnassignedCount, report.Queue.AvgAgeDays)
 		fmt.Printf("  On Track: %d | Due Soon: %d | Overdue: %d | Due Soon Ratio: %.2f\n",
 			report.Queue.OnTrackCount, report.Queue.DueSoonCount, report.Queue.OverdueCount, report.Queue.DueSoonRatio)
+		if report.Queue.ClearancePlan != nil {
+			plan := report.Queue.ClearancePlan
+			fmt.Printf("  Clearance Target: %d days | Required: %.2f/day (%.2f/week) | Current: %.2f/day (%.2f/week) | Gap: %.2f/day | Status: %s\n",
+				plan.TargetDays, plan.RequiredDaily, plan.RequiredWeekly, plan.CurrentDaily, plan.CurrentWeekly, plan.GapDaily, plan.Status)
+		}
 		for _, stage := range report.Queue.Stages {
 			fmt.Printf("  - %s\n", stage.Stage)
 			fmt.Printf("    Pending: %d | Avg Age: %.2f days | On Track: %d | Due Soon: %d | Overdue: %d\n",
 				stage.PendingCount, stage.AvgAgeDays, stage.OnTrackCount, stage.DueSoonCount, stage.OverdueCount)
 			fmt.Printf("    Daily Throughput: %.2f | Clear Days: %.2f | Status: %s\n",
 				stage.DailyThroughput, stage.EstimatedClearDays, stage.ClearanceStatus)
+			if stage.RequiredDailyThroughput > 0 {
+				fmt.Printf("    Required: %.2f/day (%.2f/week) | Gap: %.2f/day | Capacity: %s\n",
+					stage.RequiredDailyThroughput, stage.RequiredWeeklyThroughput, stage.ThroughputGapDaily, stage.CapacityStatus)
+			}
 		}
 		if len(report.Queue.Reviewers) > 0 {
 			maxReviewers := 5
@@ -1646,6 +1725,46 @@ func classifyRisk(avgDays float64, breachRate float64, slaDays int) string {
 		return "medium"
 	default:
 		return "low"
+	}
+}
+
+func classifyCapacity(currentDaily float64, requiredDaily float64) string {
+	if requiredDaily <= 0 {
+		return "no target set"
+	}
+	if currentDaily >= requiredDaily {
+		return "on track"
+	}
+	if currentDaily >= requiredDaily*0.75 {
+		return "needs support"
+	}
+	return "critical"
+}
+
+func buildClearancePlan(totalPending int, windowCount int, throughputDays int, targetClearDays int) *QueueClearancePlan {
+	if targetClearDays <= 0 {
+		return nil
+	}
+	currentDaily := 0.0
+	if throughputDays > 0 {
+		currentDaily = float64(windowCount) / float64(throughputDays)
+	}
+	currentWeekly := currentDaily * 7.0
+	requiredDaily := float64(totalPending) / float64(targetClearDays)
+	requiredWeekly := requiredDaily * 7.0
+	gapDaily := requiredDaily - currentDaily
+	gapWeekly := requiredWeekly - currentWeekly
+	status := classifyCapacity(currentDaily, requiredDaily)
+
+	return &QueueClearancePlan{
+		TargetDays:     targetClearDays,
+		RequiredDaily:  round(requiredDaily, 2),
+		RequiredWeekly: round(requiredWeekly, 2),
+		CurrentDaily:   round(currentDaily, 2),
+		CurrentWeekly:  round(currentWeekly, 2),
+		GapDaily:       round(gapDaily, 2),
+		GapWeekly:      round(gapWeekly, 2),
+		Status:         status,
 	}
 }
 
