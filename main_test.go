@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func findInsight(insights []Insight, area string) *Insight {
 	for i := range insights {
@@ -45,5 +48,55 @@ func TestBuildInsightsQueueCoverage(t *testing.T) {
 	}
 	if insight.Severity != "medium" {
 		t.Fatalf("expected medium severity, got %s", insight.Severity)
+	}
+}
+
+func TestBuildBriefIncludesQueueAndInsights(t *testing.T) {
+	report := Report{
+		GeneratedAt: "2026-02-07T12:00:00Z",
+		TotalEvents: 12,
+		SLADays:     10,
+		Overall: StageStats{
+			AverageDays:       9.2,
+			MedianDays:        8.8,
+			P90Days:           12.1,
+			MaxDays:           14.0,
+			SLABreachCount:    3,
+			SLABreachRate:     25.0,
+			RiskTier:          "medium",
+			DistinctReviewers: 4,
+		},
+		Stages: []StageStats{
+			{Stage: "initial", AverageDays: 11.2, SLABreachRate: 30.0, RiskTier: "high", Count: 4},
+		},
+		Insights: []Insight{
+			{Severity: "medium", Area: "overall", Message: "SLA risk is trending up.", Metric: "breach 25.0%"},
+		},
+		Queue: &QueueReport{
+			TotalPending:    5,
+			AssignedCount:   3,
+			UnassignedCount: 2,
+			AvgAgeDays:      6.2,
+			OnTrackCount:    2,
+			DueSoonCount:    2,
+			OverdueCount:    1,
+			DueSoonRatio:    0.8,
+			PriorityItems: []QueuePriorityItem{
+				{ApplicationID: "A-100", Stage: "initial", ReviewerID: "rev-1", AgeDays: 9.1, Status: "due soon"},
+			},
+		},
+	}
+	content := buildBrief(report)
+	if !strings.Contains(content, "Review Queue Ops Brief") {
+		t.Fatalf("expected brief title")
+	}
+	if !strings.Contains(content, "Queue Snapshot") {
+		t.Fatalf("expected queue snapshot section")
+	}
+	if !strings.Contains(content, "Insights") {
+		t.Fatalf("expected insights section")
+	}
+	if !strings.Contains(content, "A-100") {
+		t.Fatalf("expected priority item in brief")
 	}
 }

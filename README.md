@@ -46,6 +46,10 @@ go run . --input data/sample-events.csv --queue data/sample-queue.csv --csv-out 
 go run . --input data/sample-events.csv --queue data/sample-queue.csv --target-clear-days 10
 ```
 
+```bash
+go run . --input data/sample-events.csv --queue data/sample-queue.csv --brief-out exports/review-queue-brief.md
+```
+
 ## Postgres Persistence
 Set `GS_REVIEW_QUEUE_DB_URL` (production only) or pass `--db-url` to store run snapshots. The CLI creates a schema + table and seeds a sample run if the table is empty.
 

@@ -31,3 +31,7 @@
 ## Iteration 8
 - Added an insight deck that flags SLA risk, throughput slowdowns, latency regression, and queue coverage gaps.
 - Extended CLI output and JSON payloads with the new insight summaries plus added tests.
+
+## Iteration 9
+- Added markdown ops brief export with queue snapshot, trends, priority items, and insights.
+- Documented the brief output option and added test coverage for the new brief builder.

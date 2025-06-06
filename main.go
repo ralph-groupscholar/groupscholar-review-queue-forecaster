@@ -217,6 +217,7 @@ func main() {
 	queuePriorityTop := flag.Int("queue-priority-top", 10, "Top queue items to show in priority list")
 	jsonOutput := flag.Bool("json", false, "Emit JSON output")
 	csvOut := flag.String("csv-out", "", "Write CSV summaries using this path prefix or directory")
+	briefOut := flag.String("brief-out", "", "Write a markdown ops brief to this path or directory")
 	reviewerTop := flag.Int("reviewer-top", 5, "Top reviewers to show by throughput")
 	storeDB := flag.Bool("store-db", false, "Store report in Postgres when DB url is available")
 	dbURL := flag.String("db-url", "", "Postgres connection string (or GS_REVIEW_QUEUE_DB_URL env var)")
@@ -265,6 +266,12 @@ func main() {
 	if strings.TrimSpace(*csvOut) != "" {
 		if err := writeCSVReports(report, *csvOut); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to write csv output: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if strings.TrimSpace(*briefOut) != "" {
+		if err := writeBriefReport(report, *briefOut); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write brief output: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -1303,6 +1310,189 @@ func writeCSVReports(report Report, output string) error {
 		}
 	}
 	return nil
+}
+
+func writeBriefReport(report Report, output string) error {
+	path, err := resolveBriefPath(output)
+	if err != nil {
+		return err
+	}
+	content := buildBrief(report)
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func resolveBriefPath(output string) (string, error) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "", errors.New("brief output path is empty")
+	}
+	info, err := os.Stat(output)
+	if err == nil && info.IsDir() {
+		return filepath.Join(output, "review-queue-brief.md"), nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if filepath.Ext(output) == "" {
+		return output + ".md", nil
+	}
+	return output, nil
+}
+
+func buildBrief(report Report) string {
+	var builder strings.Builder
+	builder.WriteString("# Review Queue Ops Brief\n\n")
+	builder.WriteString(fmt.Sprintf("Generated: %s\n", report.GeneratedAt))
+	builder.WriteString(fmt.Sprintf("SLA Days: %d\n", report.SLADays))
+	builder.WriteString(fmt.Sprintf("Total Events: %d\n\n", report.TotalEvents))
+
+	builder.WriteString("## Overall\n")
+	builder.WriteString(fmt.Sprintf("- Avg: %.2f days | Median: %.2f days | P90: %.2f days | Max: %.2f days\n",
+		report.Overall.AverageDays, report.Overall.MedianDays, report.Overall.P90Days, report.Overall.MaxDays))
+	builder.WriteString(fmt.Sprintf("- SLA Breach: %d (%.1f%%) | Risk Tier: %s | Distinct Reviewers: %d\n\n",
+		report.Overall.SLABreachCount, report.Overall.SLABreachRate, report.Overall.RiskTier, report.Overall.DistinctReviewers))
+
+	builder.WriteString("## Stage Risk\n")
+	stageRisks := selectStageRisks(report.Stages, report.SLADays, 3)
+	if len(stageRisks) == 0 {
+		builder.WriteString("- No elevated stages detected.\n\n")
+	} else {
+		for _, stage := range stageRisks {
+			builder.WriteString(fmt.Sprintf("- %s | Avg: %.2f days | Breach: %.1f%% | Risk: %s\n",
+				stage.Stage, stage.AverageDays, stage.SLABreachRate, stage.RiskTier))
+		}
+		builder.WriteString("\n")
+	}
+
+	builder.WriteString("## Throughput Trend\n")
+	builder.WriteString(formatTrendSection(report.ThroughputTrend.Trends, 3))
+	builder.WriteString("\n")
+
+	builder.WriteString("## Latency Trend\n")
+	builder.WriteString(formatLatencySection(report.LatencyTrend.Trends, 3))
+	builder.WriteString("\n")
+
+	if report.Queue != nil {
+		queue := report.Queue
+		builder.WriteString("## Queue Snapshot\n")
+		builder.WriteString(fmt.Sprintf("- Pending: %d | Assigned: %d | Unassigned: %d | Avg Age: %.2f days\n",
+			queue.TotalPending, queue.AssignedCount, queue.UnassignedCount, queue.AvgAgeDays))
+		builder.WriteString(fmt.Sprintf("- On Track: %d | Due Soon: %d | Overdue: %d | Due Soon Ratio: %.2f\n",
+			queue.OnTrackCount, queue.DueSoonCount, queue.OverdueCount, queue.DueSoonRatio))
+		if queue.ClearancePlan != nil {
+			plan := queue.ClearancePlan
+			builder.WriteString(fmt.Sprintf("- Clearance Target: %d days | Required: %.2f/day | Current: %.2f/day | Gap: %.2f/day | Status: %s\n",
+				plan.TargetDays, plan.RequiredDaily, plan.CurrentDaily, plan.GapDaily, plan.Status))
+		}
+		builder.WriteString("\n")
+
+		builder.WriteString("## Queue Priority\n")
+		if len(queue.PriorityItems) == 0 {
+			builder.WriteString("- No priority items.\n\n")
+		} else {
+			maxItems := 5
+			if maxItems > len(queue.PriorityItems) {
+				maxItems = len(queue.PriorityItems)
+			}
+			for i := 0; i < maxItems; i++ {
+				item := queue.PriorityItems[i]
+				builder.WriteString(fmt.Sprintf("- %s | %s | %s | Age %.2f days | %s\n",
+					item.ApplicationID, item.Stage, item.ReviewerID, item.AgeDays, item.Status))
+			}
+			builder.WriteString("\n")
+		}
+	}
+
+	builder.WriteString("## Insights\n")
+	if len(report.Insights) == 0 {
+		builder.WriteString("- No critical insights flagged.\n")
+	} else {
+		for _, insight := range report.Insights {
+			builder.WriteString(fmt.Sprintf("- [%s] %s (%s)\n",
+				strings.ToUpper(insight.Severity), insight.Message, insight.Metric))
+		}
+	}
+
+	return builder.String()
+}
+
+func selectStageRisks(stages []StageStats, slaDays int, max int) []StageStats {
+	if len(stages) == 0 {
+		return nil
+	}
+	if max <= 0 {
+		max = 3
+	}
+	var out []StageStats
+	for _, stage := range stages {
+		if stage.Count == 0 {
+			continue
+		}
+		if stage.RiskTier == "low" && stage.SLABreachRate < 20 && stage.AverageDays < float64(slaDays) {
+			continue
+		}
+		out = append(out, stage)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+func formatTrendSection(trends []ThroughputTrend, maxStages int) string {
+	if len(trends) == 0 {
+		return "- No throughput trend data.\n"
+	}
+	var builder strings.Builder
+	for _, trend := range trends {
+		if trend.Label != "overall" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("- Overall: %+d (%.1f%%) | Current %.2f/week | Prior %.2f/week | Trend %s\n",
+			trend.Delta, trend.DeltaPercent, trend.CurrentPerWeek, trend.PriorPerWeek, trend.Trend))
+		break
+	}
+	count := 0
+	for _, trend := range trends {
+		if trend.Label == "overall" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("- %s: %+d (%.1f%%) | Current %.2f/week | Prior %.2f/week | Trend %s\n",
+			trend.Label, trend.Delta, trend.DeltaPercent, trend.CurrentPerWeek, trend.PriorPerWeek, trend.Trend))
+		count++
+		if count >= maxStages {
+			break
+		}
+	}
+	return builder.String()
+}
+
+func formatLatencySection(trends []LatencyTrend, maxStages int) string {
+	if len(trends) == 0 {
+		return "- No latency trend data.\n"
+	}
+	var builder strings.Builder
+	for _, trend := range trends {
+		if trend.Label != "overall" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("- Overall: Avg %+0.2f days | Median %+0.2f days | Trend %s\n",
+			trend.AvgDeltaDays, trend.MedianDeltaDays, trend.Trend))
+		break
+	}
+	count := 0
+	for _, trend := range trends {
+		if trend.Label == "overall" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("- %s: Avg %+0.2f days | Median %+0.2f days | Trend %s\n",
+			trend.Label, trend.AvgDeltaDays, trend.MedianDeltaDays, trend.Trend))
+		count++
+		if count >= maxStages {
+			break
+		}
+	}
+	return builder.String()
 }
 
 func resolveCSVBase(output string) (string, error) {
