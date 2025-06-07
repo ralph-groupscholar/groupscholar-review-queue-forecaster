@@ -35,3 +35,7 @@
 ## Iteration 9
 - Added markdown ops brief export with queue snapshot, trends, priority items, and insights.
 - Documented the brief output option and added test coverage for the new brief builder.
+
+## Iteration 9
+- Added CSV exports for insight deck and queue priority items.
+- Added regression test coverage for the new CSV outputs and refreshed documentation.

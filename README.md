@@ -14,6 +14,8 @@ Local-first CLI that estimates review latency, SLA breach risk, reviewer coverag
 - Queue forecast with due-soon/overdue counts, clearance estimates, and assigned vs unassigned split
 - Queue clearance capacity plan with target clear-days and throughput gaps
 - Reviewer-level queue forecast with throughput-based clear days
+- Insight deck CSV export for weekly ops reviews
+- Queue priority CSV export for top SLA-risk items
 - JSON output for downstream reporting
 - Postgres persistence with seed data for live dashboards
 
@@ -40,6 +42,10 @@ go run . --input data/sample-events.csv --queue data/sample-queue.csv
 
 ```bash
 go run . --input data/sample-events.csv --queue data/sample-queue.csv --csv-out exports/review-queue
+```
+
+```bash
+go run . --input data/sample-events.csv --queue data/sample-queue.csv --csv-out exports/review-queue --brief-out exports/review-brief.md
 ```
 
 ```bash

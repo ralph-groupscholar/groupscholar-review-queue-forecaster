@@ -1301,11 +1301,17 @@ func writeCSVReports(report Report, output string) error {
 	if err := writeLatencyTrendCSV(basePath+"-latency-trend.csv", report.LatencyTrend.Trends); err != nil {
 		return err
 	}
+	if err := writeInsightCSV(basePath+"-insights.csv", report.Insights); err != nil {
+		return err
+	}
 	if report.Queue != nil {
 		if err := writeQueueCSV(basePath+"-queue-forecast.csv", report.Queue); err != nil {
 			return err
 		}
 		if err := writeQueueReviewerCSV(basePath+"-queue-reviewer-forecast.csv", report.Queue); err != nil {
+			return err
+		}
+		if err := writeQueuePriorityCSV(basePath+"-queue-priority.csv", report.Queue); err != nil {
 			return err
 		}
 	}
@@ -1792,6 +1798,68 @@ func writeLatencyTrendCSV(path string, trends []LatencyTrend) error {
 			formatFloat(trend.MedianDeltaDays, 2),
 			formatFloat(trend.MedianDeltaPct, 1),
 			trend.Trend,
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeInsightCSV(path string, insights []Insight) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{"severity", "area", "message", "metric"}); err != nil {
+		return err
+	}
+	for _, insight := range insights {
+		record := []string{
+			insight.Severity,
+			insight.Area,
+			insight.Message,
+			insight.Metric,
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeQueuePriorityCSV(path string, queue *QueueReport) error {
+	if queue == nil {
+		return nil
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"application_id", "stage", "reviewer_id", "submitted_at", "age_days",
+		"days_to_sla", "urgency_score", "status",
+	}); err != nil {
+		return err
+	}
+	for _, item := range queue.PriorityItems {
+		record := []string{
+			item.ApplicationID,
+			item.Stage,
+			item.ReviewerID,
+			item.SubmittedAt,
+			formatFloat(item.AgeDays, 2),
+			formatFloat(item.DaysToSLA, 2),
+			formatFloat(item.UrgencyScore, 2),
+			item.Status,
 		}
 		if err := writer.Write(record); err != nil {
 			return err

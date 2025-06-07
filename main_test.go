@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func findInsight(insights []Insight, area string) *Insight {
@@ -98,5 +101,73 @@ func TestBuildBriefIncludesQueueAndInsights(t *testing.T) {
 	}
 	if !strings.Contains(content, "A-100") {
 		t.Fatalf("expected priority item in brief")
+	}
+}
+
+func TestWriteCSVReportsIncludesInsightsAndPriority(t *testing.T) {
+	report := Report{
+		GeneratedAt: time.Now().Format(time.RFC3339),
+		TotalEvents: 1,
+		Overall: StageStats{
+			Stage:          "overall",
+			AverageDays:    2.0,
+			MedianDays:     2.0,
+			P90Days:        2.0,
+			MaxDays:        2.0,
+			SLABreachCount: 0,
+			SLABreachRate:  0,
+			RiskTier:       "low",
+		},
+		Stages: []StageStats{{Stage: "review", Count: 1}},
+		Reviewers: []ReviewerStats{{
+			ReviewerID:        "rev-1",
+			AverageDays:       2.0,
+			ThroughputPerWeek: 1.0,
+			SLABreachCount:    0,
+			SLABreachRate:     0,
+		}},
+		SLADays: 10,
+		Throughput: ThroughputSummary{
+			AsOf:              time.Now().Format(time.RFC3339),
+			WindowDays:        7,
+			EventsInWindow:    1,
+			ThroughputPerWeek: 1.0,
+		},
+		ThroughputTrend: ThroughputTrendSummary{
+			Trends: []ThroughputTrend{{Label: "overall"}},
+		},
+		LatencyTrend: LatencyTrendSummary{
+			Trends: []LatencyTrend{{Label: "overall"}},
+		},
+		Insights: []Insight{{Severity: "high", Area: "overall", Message: "test", Metric: "metric"}},
+		Queue: &QueueReport{
+			TotalPending: 1,
+			PriorityItems: []QueuePriorityItem{{
+				ApplicationID: "app-1",
+				Stage:         "review",
+				ReviewerID:    "rev-1",
+				SubmittedAt:   time.Now().Format(time.RFC3339),
+				AgeDays:       2.0,
+				DaysToSLA:     8.0,
+				UrgencyScore:  1.2,
+				Status:        "due soon",
+			}},
+		},
+	}
+
+	dir := t.TempDir()
+	if err := writeCSVReports(report, dir); err != nil {
+		t.Fatalf("writeCSVReports failed: %v", err)
+	}
+
+	base := filepath.Join(dir, "review-queue")
+	paths := []string{
+		base + "-insights.csv",
+		base + "-queue-priority.csv",
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected csv output at %s: %v", path, err)
+		}
 	}
 }
